@@ -1,5 +1,8 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
+
+export const dynamic = "force-dynamic";
+
 import {
   Table,
   TableBody,
