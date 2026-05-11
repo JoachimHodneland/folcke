@@ -28,7 +28,7 @@ export default async function HistoryPage() {
   const { data: orders } = await supabase
     .from("orders")
     .select(
-      "id, ins_id, side, limit_price, qty, status, placed_at, matched_at, closed_at, pnl_sek, pair_id, instruments(ticker)"
+      "id, ins_id, side, limit_price, qty, qty_filled, avg_fill_price, status, placed_at, matched_at, closed_at, pnl_sek, pair_id, instruments(ticker)"
     )
     .eq("status", "SOLD")
     .order("closed_at", { ascending: false });
@@ -87,8 +87,8 @@ export default async function HistoryPage() {
               <TableRow>
                 <TableHead>Ticker</TableHead>
                 <TableHead>Side</TableHead>
-                <TableHead className="text-right">Limit price</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
+                <TableHead className="text-right">Avg fill</TableHead>
+                <TableHead className="text-right">Qty filled</TableHead>
                 <TableHead>Placed</TableHead>
                 <TableHead>Matched</TableHead>
                 <TableHead>Closed</TableHead>
@@ -114,8 +114,8 @@ export default async function HistoryPage() {
                         {r.side}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right font-mono">{fmt(r.limit_price, 4)}</TableCell>
-                    <TableCell className="text-right font-mono">{r.qty.toLocaleString()}</TableCell>
+                    <TableCell className="text-right font-mono">{fmt(r.avg_fill_price ?? r.limit_price, 4)}</TableCell>
+                    <TableCell className="text-right font-mono">{(r.qty_filled ?? r.qty).toLocaleString()}</TableCell>
                     <TableCell className="font-mono text-muted-foreground">
                       {new Date(r.placed_at).toLocaleDateString("sv-SE")}
                     </TableCell>
