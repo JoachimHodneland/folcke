@@ -37,6 +37,30 @@ export interface ScreeningCandidate {
   rank: number;
 }
 
+export interface ScreeningResult {
+  ins_id: number;
+  passed: boolean;
+  failure_reason: string | null;
+  is_owned: boolean;
+  last_close: number | null;
+  spread_pct: number | null;
+  avg_turnover_30d: number | null;
+  trend_1m_pct: number | null;
+  trend_3m_pct: number | null;
+  support_level: number | null;
+  support_touches: number | null;
+  resistance_level: number | null;
+  resistance_touches: number | null;
+  range_width_pct: number | null;
+  position_in_range: number | null;
+  score: number | null;
+  suggested_buy_price: number | null;
+  suggested_sell_price: number | null;
+  suggested_qty: number | null;
+  suggested_position_sek: number | null;
+  rank: number | null;
+}
+
 // Supabase PostgREST default max-rows is 1000. Page accordingly.
 const SUPABASE_PAGE_SIZE = 1000;
 
@@ -62,8 +86,43 @@ async function fetchPaged(supabase: any, cutoff: string): Promise<RawPrice[]> {
   return rows;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function runScreening(supabase: any): Promise<ScreeningCandidate[]> {
+function makeFailedResult(
+  ins_id: number,
+  reason: string,
+  is_owned: boolean,
+  partial: Partial<ScreeningResult> = {}
+): ScreeningResult {
+  return {
+    ins_id,
+    passed: false,
+    failure_reason: reason,
+    is_owned,
+    last_close: null,
+    spread_pct: null,
+    avg_turnover_30d: null,
+    trend_1m_pct: null,
+    trend_3m_pct: null,
+    support_level: null,
+    support_touches: null,
+    resistance_level: null,
+    resistance_touches: null,
+    range_width_pct: null,
+    position_in_range: null,
+    score: null,
+    suggested_buy_price: null,
+    suggested_sell_price: null,
+    suggested_qty: null,
+    suggested_position_sek: null,
+    rank: null,
+    ...partial,
+  };
+}
+
+export async function runScreening(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  ownedInsIds: Set<number> = new Set()
+): Promise<{ candidates: ScreeningCandidate[]; all: ScreeningResult[] }> {
   // Load instruments from our three target markets
   const { data: instruments, error: insErr } = await supabase
     .from("instruments")
@@ -88,10 +147,24 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
   }
 
   const candidates: ScreeningCandidate[] = [];
+  const allResults: ScreeningResult[] = [];
 
   for (const ins of instruments as RawInstrument[]) {
+    const isOwned = ownedInsIds.has(ins.ins_id);
+
+    // Check owned first
+    if (isOwned) {
+      const history = byIns.get(ins.ins_id) ?? [];
+      const lastClose = history.length > 0 ? history[0].close : null;
+      allResults.push(makeFailedResult(ins.ins_id, "owned", true, { last_close: lastClose }));
+      continue;
+    }
+
     const history = byIns.get(ins.ins_id) ?? [];
-    if (history.length < 30) continue;
+    if (history.length < 30) {
+      allResults.push(makeFailedResult(ins.ins_id, "insufficient_history", false));
+      continue;
+    }
 
     const days90 = history.slice(0, 90);
     const latest = days90[0];
@@ -99,32 +172,49 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
 
     // ── Stage A: hard filters ──────────────────────────────────────────────
 
-    if (last_close < 0.5 || last_close > 10) { continue; }
+    if (last_close < 0.5 || last_close > 10) {
+      allResults.push(makeFailedResult(ins.ins_id, "price_out_of_range", false, { last_close }));
+      continue;
+    }
 
     const days30 = days90.slice(0, 30);
 
-    // 30-day average spread: avoids single-day volatility spike disqualifying a stable stock
     const spread_pct =
       days30.reduce((s, d) => s + ((d.high - d.low) / d.close) * 100, 0) /
       days30.length;
-    if (spread_pct < 2 || spread_pct > 12) { continue; }
+    if (spread_pct < 2 || spread_pct > 12) {
+      allResults.push(makeFailedResult(ins.ins_id, "spread_out_of_range", false, { last_close, spread_pct }));
+      continue;
+    }
+
     const avg_turnover_30d =
       days30.reduce((s, d) => s + d.close * d.volume, 0) / days30.length;
-    if (avg_turnover_30d < 100_000 || avg_turnover_30d > 2_000_000) { continue; }
+    if (avg_turnover_30d < 100_000 || avg_turnover_30d > 2_000_000) {
+      allResults.push(makeFailedResult(ins.ins_id, "turnover_out_of_range", false, { last_close, spread_pct, avg_turnover_30d }));
+      continue;
+    }
 
     const close21d = history[Math.min(21, history.length - 1)].close;
     const close90d = history[Math.min(89, history.length - 1)].close;
     const trend_1m_pct = ((last_close - close21d) / close21d) * 100;
     const trend_3m_pct = ((last_close - close90d) / close90d) * 100;
 
-    if (trend_1m_pct < -12 || trend_1m_pct > 15) { continue; }
-    if (trend_3m_pct < -12 || trend_3m_pct > 18) { continue; }
-    if (Math.abs(trend_1m_pct - trend_3m_pct) > 20) { continue; }
+    const stageAPartial = { last_close, spread_pct, avg_turnover_30d, trend_1m_pct, trend_3m_pct };
+
+    if (trend_1m_pct < -12 || trend_1m_pct > 15) {
+      allResults.push(makeFailedResult(ins.ins_id, "trend_1m_out_of_range", false, stageAPartial));
+      continue;
+    }
+    if (trend_3m_pct < -12 || trend_3m_pct > 18) {
+      allResults.push(makeFailedResult(ins.ins_id, "trend_3m_out_of_range", false, stageAPartial));
+      continue;
+    }
+    if (Math.abs(trend_1m_pct - trend_3m_pct) > 20) {
+      allResults.push(makeFailedResult(ins.ins_id, "trend_inconsistent", false, stageAPartial));
+      continue;
+    }
 
     // ── Stage B: support / resistance touch count ──────────────────────────
-    // Uses histogram banding: count days where the low/high was *within* each
-    // 1% band below/above last_close. This identifies genuine price floors/ceilings
-    // rather than cumulative "below level" which would always favour the nearest level.
 
     let support_level = 0;
     let support_touches = 0;
@@ -137,10 +227,13 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
       ).length;
       if (touches >= 5 && touches > support_touches) {
         support_touches = touches;
-        support_level = band_top; // upper edge of band = support price
+        support_level = band_top;
       }
     }
-    if (support_level === 0) { continue; }
+    if (support_level === 0) {
+      allResults.push(makeFailedResult(ins.ins_id, "no_support", false, stageAPartial));
+      continue;
+    }
 
     let resistance_level = 0;
     let resistance_touches = 0;
@@ -153,22 +246,40 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
       ).length;
       if (touches >= 5 && touches > resistance_touches) {
         resistance_touches = touches;
-        resistance_level = band_bot; // lower edge of band = resistance price
+        resistance_level = band_bot;
       }
     }
-    if (resistance_level === 0) { continue; }
+    if (resistance_level === 0) {
+      allResults.push(makeFailedResult(ins.ins_id, "no_resistance", false, {
+        ...stageAPartial, support_level, support_touches,
+      }));
+      continue;
+    }
 
-    // Combined touch minimum: each side needs ≥5, together ≥10
-    if (support_touches + resistance_touches < 10) { continue; }
+    if (support_touches + resistance_touches < 10) {
+      allResults.push(makeFailedResult(ins.ins_id, "touches_too_low", false, {
+        ...stageAPartial, support_level, support_touches, resistance_level, resistance_touches,
+      }));
+      continue;
+    }
 
     const range_width_pct =
       ((resistance_level - support_level) / support_level) * 100;
-    if (range_width_pct < 5) { continue; }
+    if (range_width_pct < 5) {
+      allResults.push(makeFailedResult(ins.ins_id, "range_too_narrow", false, {
+        ...stageAPartial, support_level, support_touches, resistance_level, resistance_touches, range_width_pct,
+      }));
+      continue;
+    }
 
-    // Position within the range: 0 = at support, 1 = at resistance
     const position_in_range =
       (last_close - support_level) / (resistance_level - support_level);
-    if (position_in_range > 0.70) { continue; }
+    if (position_in_range > 0.70) {
+      allResults.push(makeFailedResult(ins.ins_id, "position_too_high", false, {
+        ...stageAPartial, support_level, support_touches, resistance_level, resistance_touches, range_width_pct, position_in_range,
+      }));
+      continue;
+    }
 
     // ── Scoring ────────────────────────────────────────────────────────────
 
@@ -183,8 +294,12 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
     const suggested_buy_price = roundUpToTick(support_level);
     const suggested_sell_price = roundDownToTick(resistance_level);
 
-    // Guard: tick rounding must not invert the range
-    if (suggested_sell_price <= suggested_buy_price) { continue; }
+    if (suggested_sell_price <= suggested_buy_price) {
+      allResults.push(makeFailedResult(ins.ins_id, "tick_range_invalid", false, {
+        ...stageAPartial, support_level, support_touches, resistance_level, resistance_touches, range_width_pct, position_in_range,
+      }));
+      continue;
+    }
 
     const suggested_position_sek = Math.max(
       25_000,
@@ -193,7 +308,12 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
     const suggested_qty = Math.floor(
       suggested_position_sek / suggested_buy_price
     );
-    if (suggested_qty <= 0) { continue; }
+    if (suggested_qty <= 0) {
+      allResults.push(makeFailedResult(ins.ins_id, "qty_zero", false, {
+        ...stageAPartial, support_level, support_touches, resistance_level, resistance_touches, range_width_pct, position_in_range,
+      }));
+      continue;
+    }
 
     candidates.push({
       ins_id: ins.ins_id,
@@ -219,9 +339,64 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
 
   // Sort by score, assign rank, return top 30
   candidates.sort((a, b) => b.score - a.score);
-  candidates.slice(0, 30).forEach((c, i) => {
+  const top30 = candidates.slice(0, 30);
+  top30.forEach((c, i) => {
     c.rank = i + 1;
   });
 
-  return candidates.slice(0, 30);
+  // Add passed candidates to allResults
+  for (const c of top30) {
+    allResults.push({
+      ins_id: c.ins_id,
+      passed: true,
+      failure_reason: null,
+      is_owned: false,
+      last_close: c.last_close,
+      spread_pct: c.spread_pct,
+      avg_turnover_30d: c.avg_turnover_30d,
+      trend_1m_pct: c.trend_1m_pct,
+      trend_3m_pct: c.trend_3m_pct,
+      support_level: c.support_level,
+      support_touches: c.support_touches,
+      resistance_level: c.resistance_level,
+      resistance_touches: c.resistance_touches,
+      range_width_pct: c.range_width_pct,
+      position_in_range: c.position_in_range,
+      score: c.score,
+      suggested_buy_price: c.suggested_buy_price,
+      suggested_sell_price: c.suggested_sell_price,
+      suggested_qty: c.suggested_qty,
+      suggested_position_sek: c.suggested_position_sek,
+      rank: c.rank,
+    });
+  }
+
+  // Also add candidates that passed filters but didn't make top 30 (unranked)
+  for (const c of candidates.slice(30)) {
+    allResults.push({
+      ins_id: c.ins_id,
+      passed: true,
+      failure_reason: null,
+      is_owned: false,
+      last_close: c.last_close,
+      spread_pct: c.spread_pct,
+      avg_turnover_30d: c.avg_turnover_30d,
+      trend_1m_pct: c.trend_1m_pct,
+      trend_3m_pct: c.trend_3m_pct,
+      support_level: c.support_level,
+      support_touches: c.support_touches,
+      resistance_level: c.resistance_level,
+      resistance_touches: c.resistance_touches,
+      range_width_pct: c.range_width_pct,
+      position_in_range: c.position_in_range,
+      score: c.score,
+      suggested_buy_price: c.suggested_buy_price,
+      suggested_sell_price: c.suggested_sell_price,
+      suggested_qty: c.suggested_qty,
+      suggested_position_sek: c.suggested_position_sek,
+      rank: null,
+    });
+  }
+
+  return { candidates: top30, all: allResults };
 }
