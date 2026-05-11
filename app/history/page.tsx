@@ -9,21 +9,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-
-interface Order {
-  id: string;
-  ins_id: number;
-  side: string;
-  limit_price: number;
-  qty: number;
-  status: string;
-  placed_at: string;
-  matched_at: string | null;
-  closed_at: string | null;
-  pnl_sek: number | null;
-  pair_id: string | null;
-  instruments: { ticker: string } | null;
-}
+import type { Order } from "@/lib/types";
 
 function fmt(n: number, dec = 2) {
   return n.toFixed(dec);

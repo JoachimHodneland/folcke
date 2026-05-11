@@ -11,19 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { OrderActions } from "@/components/order-actions";
 import { cn } from "@/lib/utils";
-
-interface Order {
-  id: string;
-  ins_id: number;
-  side: string;
-  limit_price: number;
-  qty: number;
-  status: string;
-  placed_at: string;
-  matched_at: string | null;
-  instruments: { ticker: string } | null;
-  daily_prices: { close: number }[] | null;
-}
+import type { Order } from "@/lib/types";
 
 function fmt(n: number, dec = 2) {
   return n.toFixed(dec);
