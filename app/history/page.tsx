@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import {
   Table,
@@ -23,7 +23,7 @@ function daysBetween(a: string, b: string | null): number | null {
 }
 
 export default async function HistoryPage() {
-  const supabase = await createClient();
+  const supabase = createServiceClient();
 
   const { data: orders } = await supabase
     .from("orders")

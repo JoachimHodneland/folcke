@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import {
   Table,
@@ -24,14 +24,14 @@ function daysOpen(placed: string, reference: string | null): number {
 }
 
 export default async function OrdersPage() {
-  const supabase = await createClient();
+  const supabase = createServiceClient();
 
   const { data: orders } = await supabase
     .from("orders")
     .select(
-      "id, ins_id, side, limit_price, qty, status, placed_at, matched_at, instruments(ticker)"
+      "id, ins_id, side, limit_price, qty, qty_filled, avg_fill_price, last_fill_at, status, placed_at, matched_at, pair_id, instruments(ticker)"
     )
-    .in("status", ["PLACED", "MATCHED"])
+    .in("status", ["PLACED", "PARTIAL", "MATCHED"])
     .order("placed_at", { ascending: false });
 
   const rows = (orders ?? []) as unknown as Order[];
@@ -39,6 +39,8 @@ export default async function OrdersPage() {
   // Fetch current closes for all instruments
   const insIds = [...new Set(rows.map((r) => r.ins_id))];
   const closesMap = new Map<number, number>();
+
+  const sellPriceMap = new Map<number, number>();
 
   if (insIds.length > 0) {
     for (const insId of insIds) {
@@ -50,6 +52,15 @@ export default async function OrdersPage() {
         .limit(1)
         .maybeSingle();
       if (data) closesMap.set(insId, data.close);
+
+      const { data: screening } = await supabase
+        .from("screenings")
+        .select("suggested_sell_price")
+        .eq("ins_id", insId)
+        .order("screened_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (screening) sellPriceMap.set(insId, screening.suggested_sell_price);
     }
   }
 
@@ -133,7 +144,14 @@ export default async function OrdersPage() {
                     <TableCell>
                       <OrderActions
                         orderId={r.id}
-                        currentStatus={r.status as "PLACED" | "MATCHED"}
+                        currentStatus={r.status as "PLACED" | "PARTIAL" | "MATCHED"}
+                        side={r.side}
+                        qty={r.qty}
+                        qtyFilled={r.qty_filled ?? 0}
+                        avgFillPrice={r.avg_fill_price ?? null}
+                        pairId={r.pair_id ?? null}
+                        insId={r.ins_id}
+                        suggestedSellPrice={sellPriceMap.get(r.ins_id) ?? null}
                       />
                     </TableCell>
                   </TableRow>
