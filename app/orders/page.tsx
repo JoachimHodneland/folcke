@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import {
   Table,
@@ -11,19 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { OrderActions } from "@/components/order-actions";
 import { cn } from "@/lib/utils";
-
-interface Order {
-  id: string;
-  ins_id: number;
-  side: string;
-  limit_price: number;
-  qty: number;
-  status: string;
-  placed_at: string;
-  matched_at: string | null;
-  instruments: { ticker: string } | null;
-  daily_prices: { close: number }[] | null;
-}
+import type { Order } from "@/lib/types";
 
 function fmt(n: number, dec = 2) {
   return n.toFixed(dec);
@@ -35,22 +23,52 @@ function daysOpen(placed: string, reference: string | null): number {
   return Math.floor((to.getTime() - from.getTime()) / 86_400_000);
 }
 
-export default async function OrdersPage() {
-  const supabase = await createClient();
+function statusBadge(status: string) {
+  if (status === "PARTIAL") {
+    return <Badge className="bg-orange-500 text-white hover:bg-orange-500/80">{status}</Badge>;
+  }
+  if (status === "MATCHED") {
+    return <Badge variant="default">{status}</Badge>;
+  }
+  return <Badge variant="secondary">{status}</Badge>;
+}
 
+export default async function OrdersPage() {
+  const supabase = createServiceClient();
+
+  // Fetch all non-cancelled, non-sold orders for active view
   const { data: orders } = await supabase
     .from("orders")
     .select(
-      "id, ins_id, side, limit_price, qty, status, placed_at, matched_at, instruments(ticker)"
+      "id, ins_id, side, limit_price, qty, qty_filled, avg_fill_price, last_fill_at, status, placed_at, matched_at, pair_id, instruments(ticker)"
     )
-    .in("status", ["PLACED", "MATCHED"])
+    .in("status", ["PLACED", "PARTIAL", "MATCHED"])
     .order("placed_at", { ascending: false });
 
   const rows = (orders ?? []) as unknown as Order[];
 
-  // Fetch current closes for all instruments
+  // Also fetch all orders with fills for holdings calculation
+  const { data: allOrders } = await supabase
+    .from("orders")
+    .select("ins_id, side, qty_filled, instruments(ticker)")
+    .in("status", ["PARTIAL", "MATCHED", "SOLD"])
+    .gt("qty_filled", 0);
+
+  // Compute holdings: sum(buy.qty_filled) - sum(sell.qty_filled) per ins_id
+  const holdingsMap = new Map<number, { ticker: string; qty: number }>();
+  for (const o of (allOrders ?? []) as unknown as { ins_id: number; side: string; qty_filled: number; instruments: { ticker: string } | null }[]) {
+    const existing = holdingsMap.get(o.ins_id) ?? { ticker: o.instruments?.ticker ?? `#${o.ins_id}`, qty: 0 };
+    existing.qty += o.side === "BUY" ? (o.qty_filled ?? 0) : -(o.qty_filled ?? 0);
+    holdingsMap.set(o.ins_id, existing);
+  }
+  const holdings = [...holdingsMap.entries()]
+    .map(([insId, h]) => ({ insId, ...h }))
+    .filter((h) => h.qty > 0);
+
+  // Fetch current closes and screening sell prices for all instruments
   const insIds = [...new Set(rows.map((r) => r.ins_id))];
   const closesMap = new Map<number, number>();
+  const sellPriceMap = new Map<number, number>();
 
   if (insIds.length > 0) {
     for (const insId of insIds) {
@@ -62,20 +80,45 @@ export default async function OrdersPage() {
         .limit(1)
         .maybeSingle();
       if (data) closesMap.set(insId, data.close);
+
+      const { data: screening } = await supabase
+        .from("screenings")
+        .select("suggested_sell_price")
+        .eq("ins_id", insId)
+        .order("screened_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (screening) sellPriceMap.set(insId, screening.suggested_sell_price);
     }
   }
-
-  const statusVariant = (s: string) =>
-    s === "PLACED" ? "secondary" : "default";
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold">Active orders</h1>
-          <p className="text-xs text-muted-foreground">{rows.length} open · PLACED + MATCHED</p>
+          <p className="text-xs text-muted-foreground">
+            {rows.length} open · PLACED + PARTIAL + MATCHED
+          </p>
         </div>
       </div>
+
+      {/* Holdings summary */}
+      {holdings.length > 0 && (
+        <div className="border rounded-md p-3">
+          <h2 className="text-xs font-semibold mb-2">Beholdning</h2>
+          <div className="flex flex-wrap gap-3">
+            {holdings.map((h) => (
+              <div key={h.insId} className="text-xs">
+                <Link href={`/stocks/${encodeURIComponent(h.ticker)}`} className="font-medium hover:underline">
+                  {h.ticker}
+                </Link>
+                <span className="text-muted-foreground ml-1">{h.qty.toLocaleString("sv-SE")} stk</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <p className="text-sm text-muted-foreground py-12 text-center">No active orders.</p>
@@ -102,10 +145,23 @@ export default async function OrdersPage() {
                 const totalSek = r.limit_price * r.qty;
                 const days = daysOpen(r.placed_at, null);
                 const currentClose = closesMap.get(r.ins_id);
+                const qtyFilled = r.qty_filled ?? 0;
+
+                // Dist%: use avg_fill_price for PARTIAL/MATCHED, else limit_price
+                const refPrice =
+                  (r.status === "PARTIAL" || r.status === "MATCHED") && r.avg_fill_price
+                    ? r.avg_fill_price
+                    : r.limit_price;
                 const distPct =
                   currentClose !== undefined
-                    ? ((r.limit_price - currentClose) / currentClose) * 100
+                    ? ((refPrice - currentClose) / currentClose) * 100
                     : null;
+
+                // Qty display: "filled / total (pct%)" for PARTIAL
+                const qtyDisplay =
+                  r.status === "PARTIAL"
+                    ? `${qtyFilled.toLocaleString("sv-SE")} / ${r.qty.toLocaleString("sv-SE")} (${Math.round((qtyFilled / r.qty) * 100)}%)`
+                    : r.qty.toLocaleString("sv-SE");
 
                 return (
                   <TableRow key={r.id}>
@@ -120,11 +176,9 @@ export default async function OrdersPage() {
                       </span>
                     </TableCell>
                     <TableCell className="text-right font-mono">{fmt(r.limit_price, 4)}</TableCell>
-                    <TableCell className="text-right font-mono">{r.qty.toLocaleString()}</TableCell>
+                    <TableCell className="text-right font-mono">{qtyDisplay}</TableCell>
                     <TableCell className="text-right font-mono">{Math.round(totalSek).toLocaleString("sv-SE")}</TableCell>
-                    <TableCell>
-                      <Badge variant={statusVariant(r.status)}>{r.status}</Badge>
-                    </TableCell>
+                    <TableCell>{statusBadge(r.status)}</TableCell>
                     <TableCell className={cn("text-right font-mono", days > 10 && "text-amber-600")}>
                       {days}d
                     </TableCell>
@@ -145,7 +199,14 @@ export default async function OrdersPage() {
                     <TableCell>
                       <OrderActions
                         orderId={r.id}
-                        currentStatus={r.status as "PLACED" | "MATCHED"}
+                        currentStatus={r.status as "PLACED" | "PARTIAL" | "MATCHED"}
+                        side={r.side}
+                        qty={r.qty}
+                        qtyFilled={qtyFilled}
+                        avgFillPrice={r.avg_fill_price ?? null}
+                        pairId={r.pair_id ?? null}
+                        insId={r.ins_id}
+                        suggestedSellPrice={sellPriceMap.get(r.ins_id) ?? null}
                       />
                     </TableCell>
                   </TableRow>

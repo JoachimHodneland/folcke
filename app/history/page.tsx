@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import {
   Table,
@@ -9,21 +9,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-
-interface Order {
-  id: string;
-  ins_id: number;
-  side: string;
-  limit_price: number;
-  qty: number;
-  status: string;
-  placed_at: string;
-  matched_at: string | null;
-  closed_at: string | null;
-  pnl_sek: number | null;
-  pair_id: string | null;
-  instruments: { ticker: string } | null;
-}
+import type { Order } from "@/lib/types";
 
 function fmt(n: number, dec = 2) {
   return n.toFixed(dec);
@@ -37,12 +23,12 @@ function daysBetween(a: string, b: string | null): number | null {
 }
 
 export default async function HistoryPage() {
-  const supabase = await createClient();
+  const supabase = createServiceClient();
 
   const { data: orders } = await supabase
     .from("orders")
     .select(
-      "id, ins_id, side, limit_price, qty, status, placed_at, matched_at, closed_at, pnl_sek, pair_id, instruments(ticker)"
+      "id, ins_id, side, limit_price, qty, qty_filled, avg_fill_price, status, placed_at, matched_at, closed_at, pnl_sek, pair_id, instruments(ticker)"
     )
     .eq("status", "SOLD")
     .order("closed_at", { ascending: false });
@@ -101,8 +87,8 @@ export default async function HistoryPage() {
               <TableRow>
                 <TableHead>Ticker</TableHead>
                 <TableHead>Side</TableHead>
-                <TableHead className="text-right">Limit price</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
+                <TableHead className="text-right">Avg fill</TableHead>
+                <TableHead className="text-right">Qty filled</TableHead>
                 <TableHead>Placed</TableHead>
                 <TableHead>Matched</TableHead>
                 <TableHead>Closed</TableHead>
@@ -128,8 +114,8 @@ export default async function HistoryPage() {
                         {r.side}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right font-mono">{fmt(r.limit_price, 4)}</TableCell>
-                    <TableCell className="text-right font-mono">{r.qty.toLocaleString()}</TableCell>
+                    <TableCell className="text-right font-mono">{fmt(r.avg_fill_price ?? r.limit_price, 4)}</TableCell>
+                    <TableCell className="text-right font-mono">{(r.qty_filled ?? r.qty).toLocaleString()}</TableCell>
                     <TableCell className="font-mono text-muted-foreground">
                       {new Date(r.placed_at).toLocaleDateString("sv-SE")}
                     </TableCell>

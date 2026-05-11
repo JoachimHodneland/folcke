@@ -9,7 +9,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 
 interface Props {
@@ -34,18 +33,20 @@ export function AddOrderModal({ insId, ticker, suggestedBuy, suggestedSell, sugg
     setSaving(true);
     setError("");
 
-    const supabase = createClient();
-    const { error } = await supabase.from("orders").insert({
-      ins_id: insId,
-      side,
-      limit_price: parseFloat(price),
-      qty: parseInt(qty, 10),
-      status: "PLACED",
-      placed_at: new Date().toISOString(),
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ins_id: insId,
+        side,
+        limit_price: price,
+        qty,
+      }),
     });
 
-    if (error) {
-      setError(error.message);
+    if (!res.ok) {
+      const { error: msg } = await res.json();
+      setError(msg ?? "Failed to create order");
       setSaving(false);
     } else {
       setOpen(false);
