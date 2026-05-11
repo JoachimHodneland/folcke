@@ -117,8 +117,9 @@ export async function runScreening(supabase: any): Promise<ScreeningCandidate[]>
     const trend_1m_pct = ((last_close - close21d) / close21d) * 100;
     const trend_3m_pct = ((last_close - close90d) / close90d) * 100;
 
-    if (trend_1m_pct <= -20) { continue; }
-    if (trend_3m_pct < -20 || trend_3m_pct > 25) { continue; }
+    if (trend_1m_pct < -12 || trend_1m_pct > 15) { continue; }
+    if (trend_3m_pct < -12 || trend_3m_pct > 18) { continue; }
+    if (Math.abs(trend_1m_pct - trend_3m_pct) > 20) { continue; }
 
     // ── Stage B: support / resistance touch count ──────────────────────────
     // Uses histogram banding: count days where the low/high was *within* each
