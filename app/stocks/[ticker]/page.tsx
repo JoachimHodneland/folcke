@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table";
 import { CandlestickChart } from "@/components/candlestick-chart";
 import { AddOrderModal } from "@/components/add-order-modal";
+import { cn } from "@/lib/utils";
 
 interface Props {
   params: Promise<{ ticker: string }>;
@@ -61,7 +62,7 @@ export default async function StockDetailPage({ params }: Props) {
   // All historical screening appearances
   const { data: screeningHistory } = await supabase
     .from("screenings")
-    .select("screened_at, rank, score, support_level, resistance_level, suggested_buy_price, suggested_sell_price")
+    .select("screened_at, rank, score, support_level, resistance_level, suggested_buy_price, suggested_sell_price, passed, failure_reason, is_owned")
     .eq("ins_id", ins.ins_id)
     .order("screened_at", { ascending: false })
     .limit(30);
@@ -148,7 +149,7 @@ export default async function StockDetailPage({ params }: Props) {
         )}
 
         {/* Screening history */}
-        {screeningHistory && screeningHistory.length > 1 && (
+        {screeningHistory && screeningHistory.length > 0 && (
           <div className="border rounded-md p-4 space-y-3">
             <h2 className="text-sm font-semibold">Screening history</h2>
             <Table className="text-xs">
@@ -157,20 +158,40 @@ export default async function StockDetailPage({ params }: Props) {
                   <TableHead>Date</TableHead>
                   <TableHead className="text-right">Rank</TableHead>
                   <TableHead className="text-right">Score</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Reason</TableHead>
                   <TableHead className="text-right">Buy</TableHead>
                   <TableHead className="text-right">Sell</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {screeningHistory.map((s) => (
-                  <TableRow key={s.screened_at}>
-                    <TableCell>{new Date(s.screened_at).toLocaleDateString("sv-SE")}</TableCell>
-                    <TableCell className="text-right font-mono">#{s.rank}</TableCell>
-                    <TableCell className="text-right font-mono">{fmt(s.score, 1)}</TableCell>
-                    <TableCell className="text-right font-mono">{fmt(s.suggested_buy_price, 4)}</TableCell>
-                    <TableCell className="text-right font-mono">{fmt(s.suggested_sell_price, 4)}</TableCell>
-                  </TableRow>
-                ))}
+                {screeningHistory.map((s: { screened_at: string; rank: number | null; score: number | null; suggested_buy_price: number | null; suggested_sell_price: number | null; passed: boolean | null; failure_reason: string | null; is_owned: boolean | null }) => {
+                  const isPassed = s.passed !== false;
+                  const isOwned = s.is_owned === true;
+                  const statusLabel = isPassed ? "PASSED" : isOwned ? "FILTERED" : "FAILED";
+                  return (
+                    <TableRow key={s.screened_at} className={cn(!isPassed && "opacity-60")}>
+                      <TableCell>{new Date(s.screened_at).toLocaleDateString("sv-SE")}</TableCell>
+                      <TableCell className="text-right font-mono">{s.rank ? `#${s.rank}` : "—"}</TableCell>
+                      <TableCell className="text-right font-mono">{s.score != null ? fmt(s.score, 1) : "—"}</TableCell>
+                      <TableCell>
+                        <span className={cn(
+                          "text-xs font-medium",
+                          isPassed && "text-green-600",
+                          !isPassed && !isOwned && "text-orange-600",
+                          isOwned && "text-muted-foreground",
+                        )}>
+                          {statusLabel}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {s.failure_reason ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">{s.suggested_buy_price != null ? fmt(s.suggested_buy_price, 4) : "—"}</TableCell>
+                      <TableCell className="text-right font-mono">{s.suggested_sell_price != null ? fmt(s.suggested_sell_price, 4) : "—"}</TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
