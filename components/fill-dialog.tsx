@@ -51,7 +51,8 @@ export function FillDialog({
     setSaving(true);
     setError("");
 
-    const isFullFill = mode === "full";
+    const isFirstFill = qtyFilled === 0;
+    const isFullFill = mode === "full" && !isFirstFill;
     const newFillQty = isFullFill ? remaining : parseInt(fillQty, 10);
     const newFillPrice = isFullFill ? (avgFillPrice ?? 0) : parseFloat(fillPrice);
 
@@ -62,12 +63,6 @@ export function FillDialog({
     }
     if (!isFullFill && (isNaN(newFillPrice) || newFillPrice <= 0)) {
       setError("Ugyldig pris");
-      setSaving(false);
-      return;
-    }
-    if (isFullFill && !avgFillPrice) {
-      // First fill can't use "full" without a price — need partial mode
-      setError("Ingen tidligere fyllpris — bruk delvis fyll med pris");
       setSaving(false);
       return;
     }
@@ -127,7 +122,6 @@ export function FillDialog({
     }
   }
 
-  // For first fill on a PLACED order, force partial mode (need price input)
   const isFirstFill = qtyFilled === 0;
 
   return (
