@@ -3,8 +3,9 @@
 import { revalidatePath } from "next/cache";
 
 export async function runScreeningAction() {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
   const res = await fetch(
-    `${process.env.NEXT_PUBLIC_SUPABASE_URL ? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000" : "http://localhost:3000"}/api/cron/screen`,
+    `${baseUrl}/api/cron/screen`,
     {
       method: "POST",
       headers: {
