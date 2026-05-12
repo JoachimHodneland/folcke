@@ -1,0 +1,64 @@
+name: Scheduled screening
+
+on:
+  schedule:
+    # Ingest: Mon-Fri 20:30 UTC (22:30 norsk tid)
+    - cron: "30 20 * * 1-5"
+    # Screen: Mon-Fri 21:00 UTC (23:00 norsk tid)
+    - cron: "0 21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - ingest
+          - screen
+          - both
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' && (inputs.job == 'ingest' || inputs.job == 'both')
+      || github.event_name == 'schedule' && github.event.schedule == '30 20 * * 1-5'
+    steps:
+      - name: Trigger ingest
+        run: |
+          HTTP_CODE=$(curl -s -o body.txt -w "%{http_code}" -X POST \
+            "https://folcke.vercel.app/api/cron/ingest" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat body.txt
+          echo ""
+          echo "HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Ingest failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+  screen:
+    runs-on: ubuntu-latest
+    needs: [ingest]
+    if: >-
+      always() && (
+        github.event_name == 'workflow_dispatch' && (inputs.job == 'screen' || inputs.job == 'both')
+        || github.event_name == 'schedule' && github.event.schedule == '0 21 * * 1-5'
+      )
+    steps:
+      - name: Wait for ingest data to settle
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'both'
+        run: sleep 5
+      - name: Trigger screen
+        run: |
+          HTTP_CODE=$(curl -s -o body.txt -w "%{http_code}" -X POST \
+            "https://folcke.vercel.app/api/cron/screen" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat body.txt
+          echo ""
+          echo "HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Screen failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
