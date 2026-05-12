@@ -50,11 +50,12 @@ export default async function StockDetailPage({ params }: Props) {
   // Latest 30 days for OHLCV table (most recent first)
   const ohlcv30 = [...chartData].reverse().slice(0, 30);
 
-  // Latest screening result for this instrument
+  // Latest PASSED screening result for this instrument
   const { data: screening } = await supabase
     .from("screenings")
     .select("*")
     .eq("ins_id", ins.ins_id)
+    .eq("passed", true)
     .order("screened_at", { ascending: false })
     .limit(1)
     .maybeSingle();
