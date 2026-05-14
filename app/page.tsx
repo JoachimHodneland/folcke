@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import {
   Table,
@@ -9,6 +10,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { RunScreeningButton } from "@/components/run-screening-button";
+import { CancelOrderButton, MarkSoldButton } from "@/components/action-lists";
+import { getPositionAction, getOrderAction } from "@/lib/screening/actions";
 import { cn } from "@/lib/utils";
 
 interface Screening {
@@ -46,6 +49,28 @@ interface DroppedCandidate {
   daysSinceDropped: number;
 }
 
+interface PositionExit {
+  orderId: string;
+  insId: number;
+  ticker: string;
+  name: string;
+  reason: string;
+  avgFillPrice: number;
+  lastClose: number | null;
+  qtyFilled: number;
+}
+
+interface OrderCancel {
+  orderId: string;
+  insId: number;
+  ticker: string;
+  name: string;
+  side: string;
+  limitPrice: number;
+  qty: number;
+  reason: string;
+}
+
 function fmt(n: number, dec = 2) {
   return n.toFixed(dec);
 }
@@ -75,6 +100,8 @@ export default async function TodayPage() {
   const streakMap = new Map<number, number>();
   const rankChangeMap = new Map<number, number | null>(); // null = NY
   const dropped: DroppedCandidate[] = [];
+  const positionExits: PositionExit[] = [];
+  const orderCancels: OrderCancel[] = [];
 
   if (latest) {
     // Fetch today's passed candidates
@@ -193,6 +220,74 @@ export default async function TodayPage() {
     }
 
     dropped.sort((a, b) => a.daysSinceDropped - b.daysSinceDropped);
+
+    // ── Action lists: positions to exit + orders to cancel ──────────────
+    const svc = createServiceClient();
+
+    // Fetch all active orders
+    const { data: activeOrders } = await svc
+      .from("orders")
+      .select("id, ins_id, side, status, limit_price, qty, qty_filled, avg_fill_price, instruments(ticker, name)")
+      .in("status", ["PLACED", "PARTIAL", "MATCHED"]);
+
+    const orderRows = (activeOrders ?? []) as unknown as {
+      id: string; ins_id: number; side: string; status: string;
+      limit_price: number; qty: number; qty_filled: number;
+      avg_fill_price: number | null;
+      instruments: { ticker: string; name: string } | null;
+    }[];
+
+    // Get unique ins_ids from orders to fetch their latest screenings
+    const orderInsIds = [...new Set(orderRows.map((o) => o.ins_id))];
+
+    // Fetch latest screening per ins_id (may not be at latest.screened_at)
+    const screeningByIns = new Map<number, { passed: boolean; failure_reason: string | null; last_close: number | null }>();
+    for (const insId of orderInsIds) {
+      const { data: s } = await supabase
+        .from("screenings")
+        .select("passed, failure_reason, last_close")
+        .eq("ins_id", insId)
+        .order("screened_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (s) screeningByIns.set(insId, s);
+    }
+
+    // Compute position exits (BUY MATCHED/PARTIAL with fills)
+    for (const o of orderRows) {
+      if (o.side !== "BUY" || !["MATCHED", "PARTIAL"].includes(o.status) || (o.qty_filled ?? 0) <= 0) continue;
+      const s = screeningByIns.get(o.ins_id);
+      if (!s || s.passed !== false) continue;
+      if (getPositionAction(s.failure_reason) !== "exit") continue;
+      positionExits.push({
+        orderId: o.id,
+        insId: o.ins_id,
+        ticker: o.instruments?.ticker ?? `#${o.ins_id}`,
+        name: o.instruments?.name ?? "",
+        reason: s.failure_reason ?? "unknown",
+        avgFillPrice: o.avg_fill_price ?? o.limit_price,
+        lastClose: s.last_close,
+        qtyFilled: o.qty_filled,
+      });
+    }
+
+    // Compute order cancels (PLACED/PARTIAL orders)
+    for (const o of orderRows) {
+      if (!["PLACED", "PARTIAL"].includes(o.status)) continue;
+      const s = screeningByIns.get(o.ins_id);
+      if (!s || s.passed !== false) continue;
+      if (getOrderAction(s.failure_reason) !== "cancel") continue;
+      orderCancels.push({
+        orderId: o.id,
+        insId: o.ins_id,
+        ticker: o.instruments?.ticker ?? `#${o.ins_id}`,
+        name: o.instruments?.name ?? "",
+        side: o.side,
+        limitPrice: o.limit_price,
+        qty: o.qty,
+        reason: s.failure_reason ?? "unknown",
+      });
+    }
   }
 
   const screenedAt = latest
@@ -213,6 +308,89 @@ export default async function TodayPage() {
         </div>
         <RunScreeningButton />
       </div>
+
+      {/* Positions to exit */}
+      {positionExits.length > 0 && (
+        <div className="border border-red-300 rounded-md overflow-hidden">
+          <div className="bg-red-50 px-4 py-2">
+            <h2 className="text-sm font-semibold text-red-700">Positions to exit ({positionExits.length})</h2>
+          </div>
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Ticker</TableHead>
+                <TableHead>Reason</TableHead>
+                <TableHead className="text-right">Bought at</TableHead>
+                <TableHead className="text-right">Current</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead>Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {positionExits.map((p) => (
+                <TableRow key={p.orderId}>
+                  <TableCell className="font-medium">
+                    <Link href={`/stocks/${encodeURIComponent(p.ticker)}`} className="hover:underline">{p.ticker}</Link>
+                    <span className="text-muted-foreground ml-1">{p.name}</span>
+                  </TableCell>
+                  <TableCell className="text-red-600">{p.reason}</TableCell>
+                  <TableCell className="text-right font-mono">{fmt(p.avgFillPrice, 4)}</TableCell>
+                  <TableCell className="text-right font-mono">{p.lastClose != null ? fmt(p.lastClose) : "—"}</TableCell>
+                  <TableCell className="text-right font-mono">{p.qtyFilled.toLocaleString("sv-SE")}</TableCell>
+                  <TableCell>
+                    <MarkSoldButton
+                      buyOrderId={p.orderId}
+                      insId={p.insId}
+                      qtyFilled={p.qtyFilled}
+                      avgFillPrice={p.avgFillPrice}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      {/* Orders to cancel */}
+      {orderCancels.length > 0 && (
+        <div className="border border-amber-300 rounded-md overflow-hidden">
+          <div className="bg-amber-50 px-4 py-2">
+            <h2 className="text-sm font-semibold text-amber-700">Orders to cancel ({orderCancels.length})</h2>
+          </div>
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Ticker</TableHead>
+                <TableHead>Side</TableHead>
+                <TableHead className="text-right">Limit</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead>Reason</TableHead>
+                <TableHead>Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {orderCancels.map((o) => (
+                <TableRow key={o.orderId}>
+                  <TableCell className="font-medium">
+                    <Link href={`/stocks/${encodeURIComponent(o.ticker)}`} className="hover:underline">{o.ticker}</Link>
+                    <span className="text-muted-foreground ml-1">{o.name}</span>
+                  </TableCell>
+                  <TableCell>
+                    <span className={cn("font-medium", o.side === "BUY" ? "text-green-600" : "text-red-600")}>{o.side}</span>
+                  </TableCell>
+                  <TableCell className="text-right font-mono">{fmt(o.limitPrice, 4)}</TableCell>
+                  <TableCell className="text-right font-mono">{o.qty.toLocaleString("sv-SE")}</TableCell>
+                  <TableCell className="text-amber-600">{o.reason}</TableCell>
+                  <TableCell>
+                    <CancelOrderButton orderId={o.orderId} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <p className="text-sm text-muted-foreground py-12 text-center">
